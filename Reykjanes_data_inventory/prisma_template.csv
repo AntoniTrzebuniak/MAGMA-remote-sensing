@@ -1,0 +1,2 @@
+sensor,level,product_id,pass_id,datetime_utc,scene_cloud,roi_cover_pass,notes
+PRISMA,L1,PRS_L1_STD_OFFL_20220715113022_20220715113026_0001,PRS_20220715T1130,2022-07-15T11:30:22Z,5,1.0,PRZYKŁAD - usuń ten wiersz

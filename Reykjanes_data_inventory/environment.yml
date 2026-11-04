@@ -1,0 +1,11 @@
+name: reykjanes
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - pystac-client
+  - shapely
+  - pyproj
+  - pandas
+  - rasterio
+  - planetary-computer

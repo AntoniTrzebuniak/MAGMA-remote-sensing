@@ -1,0 +1,13 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {"name": "Reykjanes ROI (Fagradalsfjall + Sundhnúkur)"},
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[[-22.50, 63.80], [-22.15, 63.80], [-22.15, 63.98], [-22.50, 63.98], [-22.50, 63.80]]]
+      }
+    }
+  ]
+}
