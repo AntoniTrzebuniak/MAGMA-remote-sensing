@@ -130,19 +130,19 @@ def job(href, dst, key, keep_local, verbose):
             t = time.time()
             if not dst.exists():
                 if verbose:
-                    print(f"> {label(dst)}" + (f" (próba {attempt + 1})" if attempt else ""), flush=True)
+                    print(f"    > {label(dst)}" + (f" (próba {attempt + 1})" if attempt else ""), flush=True)
                 with rasterio.Env(**BASE_ENV, **env_for(href)):
                     if raster:
                         clip(url_for(href), dst)
                     else:
                         fetch(href, dst)
                 if verbose:
-                    print(f"ok {label(dst)}: pobrano w {time.time() - t:.0f} s, {dst.stat().st_size / 1e6:.1f} MB", flush=True)
+                    print(f"      {label(dst)}: pobrano w {time.time() - t:.0f} s, {dst.stat().st_size / 1e6:.1f} MB", flush=True)
             if not keep_local:
                 t = time.time()
                 upload(dst, key)
                 if verbose:
-                    print(f"wyslane {label(dst)}: w buckecie po {time.time() - t:.0f} s", flush=True)
+                    print(f"      {label(dst)}: w buckecie po {time.time() - t:.0f} s", flush=True)
             return None
         except WindowError:
             return "poza ROI"
@@ -152,7 +152,7 @@ def job(href, dst, key, keep_local, verbose):
             cause = e.__cause__ or e.__context__
             err = (f"{e} ({cause})" if cause else str(e)).split("?")[0][:200]
             if verbose:
-                print(f"    ! {label(dst)}: {err} — retry za {10 * 2 ** attempt} s", flush=True)
+                print(f"    {label(dst)}: {err} — ponowne pobranie za {10 * 2 ** attempt} s", flush=True)
             time.sleep(10 * 2 ** attempt)
     return err
 
@@ -168,7 +168,7 @@ def run(rows, root, workers, label, keep_local):
         for i, f in enumerate(as_completed(futs), 1):
             r, err = futs[f], f.result()
             if err == "poza ROI":
-                print(f"  - [{i}/{n}] {Path(r.dst).name}: poza ROI,skip")
+                print(f"  - [{i}/{n}] {Path(r.dst).name}: poza ROI, pomijam")
             elif err:
                 print(f"  ! [{i}/{n}] {Path(r.dst).name}: {err}")
                 failed.append({**r._asdict(), "error": err})
@@ -182,6 +182,7 @@ def main():
     ap.add_argument("--owner", required=True)
     ap.add_argument("--priority", default="P1")
     ap.add_argument("--sensor", choices=["all", "enmap", "landsat"], default="all")
+    ap.add_argument("--day-night", choices=["all", "day", "night"], default="all")
     ap.add_argument("--root", default="data")
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--enmap-workers", type=int, default=1)
@@ -195,6 +196,8 @@ def main():
         print(f"Brak '{a.owner}' w manifeście. Dostępne --owner: {', '.join(sorted(set(m.owner)))}")
         return
     m = m[(m.owner == a.owner) & m.priority.isin(a.priority.split(","))]
+    if a.day_night != "all":
+        m = m[m.day_night == a.day_night]
     is_en = m.sensor == "EnMAP"
     if a.sensor != "all":
         m = m[is_en if a.sensor == "enmap" else ~is_en]
