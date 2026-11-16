@@ -1,4 +1,5 @@
 import argparse
+import hashlib
 import os
 import re
 import threading
@@ -140,6 +141,7 @@ def clip_any(href, dst):
 
 
 def job(href, dst, key, keep_local, verbose):
+    name = label(Path(key))
     dst.parent.mkdir(parents=True, exist_ok=True)
     raster = href.split("?")[0].upper().endswith((".TIF", ".TIFF"))
     err = None
@@ -148,19 +150,19 @@ def job(href, dst, key, keep_local, verbose):
             t = time.time()
             if not dst.exists():
                 if verbose:
-                    print(f"    > {label(dst)}" + (f" (próba {attempt + 1})" if attempt else ""), flush=True)
+                    print(f"    > {name}" + (f" (próba {attempt + 1})" if attempt else ""), flush=True)
                 with rasterio.Env(**BASE_ENV, **env_for(href)):
                     if raster:
                         clip_any(href, dst)
                     else:
                         fetch(href, dst)
                 if verbose:
-                    print(f"    ✓ {label(dst)}: pobrano w {time.time() - t:.0f} s, {dst.stat().st_size / 1e6:.1f} MB", flush=True)
+                    print(f"    ✓ {name}: pobrano w {time.time() - t:.0f} s, {dst.stat().st_size / 1e6:.1f} MB", flush=True)
             if not keep_local:
                 t = time.time()
                 upload(dst, key)
                 if verbose:
-                    print(f"    ↑ {label(dst)}: w buckecie po {time.time() - t:.0f} s", flush=True)
+                    print(f"    ↑ {name}: w buckecie po {time.time() - t:.0f} s", flush=True)
             return None
         except WindowError:
             return "poza ROI"
@@ -170,9 +172,15 @@ def job(href, dst, key, keep_local, verbose):
             cause = e.__cause__ or e.__context__
             err = (f"{e} ({cause})" if cause else str(e)).split("?")[0][:200]
             if verbose:
-                print(f"    ! {label(dst)}: {err} — ponawiam za {10 * 2 ** attempt} s", flush=True)
+                print(f"    ! {name}: {err} — ponawiam za {10 * 2 ** attempt} s", flush=True)
             time.sleep(10 * 2 ** attempt)
     return err
+
+
+def local_path(root, dst, keep_local):
+    if keep_local:
+        return root / dst
+    return root / "tmp" / (hashlib.md5(dst.encode()).hexdigest()[:12] + Path(dst).suffix)
 
 
 def run(rows, root, workers, label, keep_local):
@@ -181,7 +189,7 @@ def run(rows, root, workers, label, keep_local):
     print(f"\n{label}: {len(rows)} plików, {workers} wątk.")
     failed, n = [], len(rows)
     with ThreadPoolExecutor(workers) as ex:
-        futs = {ex.submit(job, r.href, root / r.dst, f"{GCS['prefix']}/{r.dst}", keep_local, workers <= 2): r
+        futs = {ex.submit(job, r.href, local_path(root, r.dst, keep_local), f"{GCS['prefix']}/{r.dst}", keep_local, workers <= 2): r
                 for r in rows.itertuples()}
         for i, f in enumerate(as_completed(futs), 1):
             r, err = futs[f], f.result()
@@ -209,7 +217,15 @@ def run_usgs(rows, root, workers, keep_local, batch):
         for i in range(0, len(pids), batch):
             part = rows[rows.product_id.isin(pids[i:i + batch])].copy()
             part["name"] = part.dst.map(lambda d: Path(d).name)
-            urls = api.urls(pids[i:i + batch], set(part.name))
+            try:
+                urls = api.urls(pids[i:i + batch], set(part.name))
+            except Exception as e:
+                print(f"  ! paczka {i + 1}–{min(i + batch, len(pids))}: {str(e)[:200]} — loguję ponownie, pomijam paczkę")
+                try:
+                    api.login()
+                except Exception:
+                    pass
+                urls = {}
             part["href"] = part.name.map(urls)
             missing = part[part.href.isna()]
             for r in missing.itertuples():
