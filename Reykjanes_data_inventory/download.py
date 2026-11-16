@@ -121,6 +121,24 @@ def remove_empty_dirs(root):
             pass
 
 
+def clip_any(href, dst):
+    try:
+        clip(url_for(href), dst)
+    except rasterio.errors.RasterioIOError:
+        if not href.startswith("https://") or "dlr.de" in href or "blob.core.windows.net" in href:
+            raise
+        full = dst.with_name(dst.name + ".full")
+        try:
+            with requests.get(href, stream=True, timeout=600) as r:
+                r.raise_for_status()
+                with open(full, "wb") as f:
+                    for chunk in r.iter_content(1 << 20):
+                        f.write(chunk)
+            clip(str(full), dst)
+        finally:
+            full.unlink(missing_ok=True)
+
+
 def job(href, dst, key, keep_local, verbose):
     dst.parent.mkdir(parents=True, exist_ok=True)
     raster = href.split("?")[0].upper().endswith((".TIF", ".TIFF"))
@@ -133,16 +151,16 @@ def job(href, dst, key, keep_local, verbose):
                     print(f"    > {label(dst)}" + (f" (próba {attempt + 1})" if attempt else ""), flush=True)
                 with rasterio.Env(**BASE_ENV, **env_for(href)):
                     if raster:
-                        clip(url_for(href), dst)
+                        clip_any(href, dst)
                     else:
                         fetch(href, dst)
                 if verbose:
-                    print(f"      {label(dst)}: pobrano w {time.time() - t:.0f} s, {dst.stat().st_size / 1e6:.1f} MB", flush=True)
+                    print(f"    ✓ {label(dst)}: pobrano w {time.time() - t:.0f} s, {dst.stat().st_size / 1e6:.1f} MB", flush=True)
             if not keep_local:
                 t = time.time()
                 upload(dst, key)
                 if verbose:
-                    print(f"      {label(dst)}: w buckecie po {time.time() - t:.0f} s", flush=True)
+                    print(f"    ↑ {label(dst)}: w buckecie po {time.time() - t:.0f} s", flush=True)
             return None
         except WindowError:
             return "poza ROI"
@@ -152,7 +170,7 @@ def job(href, dst, key, keep_local, verbose):
             cause = e.__cause__ or e.__context__
             err = (f"{e} ({cause})" if cause else str(e)).split("?")[0][:200]
             if verbose:
-                print(f"    {label(dst)}: {err} — ponowne pobranie za {10 * 2 ** attempt} s", flush=True)
+                print(f"    ! {label(dst)}: {err} — ponawiam za {10 * 2 ** attempt} s", flush=True)
             time.sleep(10 * 2 ** attempt)
     return err
 
@@ -177,6 +195,33 @@ def run(rows, root, workers, label, keep_local):
     return failed
 
 
+def run_usgs(rows, root, workers, keep_local, batch):
+    if rows.empty:
+        return []
+    if not (os.environ.get("USGS_USERNAME") and os.environ.get("USGS_TOKEN")):
+        print(f"\nLandsat noc: brak USGS_USERNAME / USGS_TOKEN, pomijam {len(rows)} plików")
+        return []
+    from m2m import M2M
+    api, failed = M2M(), []
+    pids = list(dict.fromkeys(rows.product_id))
+    print(f"\nLandsat noc przez USGS M2M: {len(rows)} plików, {len(pids)} scen, paczki po {batch}")
+    try:
+        for i in range(0, len(pids), batch):
+            part = rows[rows.product_id.isin(pids[i:i + batch])].copy()
+            part["name"] = part.dst.map(lambda d: Path(d).name)
+            urls = api.urls(pids[i:i + batch], set(part.name))
+            part["href"] = part.name.map(urls)
+            missing = part[part.href.isna()]
+            for r in missing.itertuples():
+                print(f"  ! {r.name}: USGS nie zwrócił linku")
+                failed.append({**r._asdict(), "error": "brak linku z M2M"})
+            failed += run(part[part.href.notna()].drop(columns="name"), root, workers,
+                          f"Landsat noc, sceny {i + 1}–{min(i + batch, len(pids))}", keep_local)
+    finally:
+        api.logout()
+    return failed
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--owner", required=True)
@@ -188,6 +233,8 @@ def main():
     ap.add_argument("--enmap-workers", type=int, default=1)
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--keep-local", action="store_true")
+    ap.add_argument("--landsat-source", choices=["usgs", "aws"], default="usgs")
+    ap.add_argument("--batch", type=int, default=20)
     a = ap.parse_args()
 
     root = Path(a.root)
@@ -217,7 +264,9 @@ def main():
     print(f"{a.owner} {a.priority}: {len(m)} plików, {done.sum()} już jest ({where}), {(~done).sum()} do pobrania")
     m, is_en = m[~done], is_en[~done]
 
-    failed = run(m[~is_en], root, a.workers, "Landsat", a.keep_local)
+    via_usgs = m.href.str.startswith("s3://") & (a.landsat_source == "usgs")
+    failed = run(m[~is_en & ~via_usgs], root, a.workers, "Landsat", a.keep_local)
+    failed += run_usgs(m[via_usgs], root, a.workers, a.keep_local, a.batch)
     failed += run(m[is_en], root, a.enmap_workers, "EnMAP", a.keep_local)
     if not a.keep_local:
         remove_empty_dirs(root / "roi")
@@ -225,10 +274,10 @@ def main():
     root.mkdir(exist_ok=True)
     if failed:
         pd.DataFrame(failed).drop(columns="Index").to_csv(log, index=False)
-        print(f"\n{len(failed)} plików nie pobrano -> {log}.")
+        print(f"\n{len(failed)} plików nie pobrano -> {log}. Uruchom ponownie to samo polecenie.")
     else:
         log.unlink(missing_ok=True)
-        print("\nGotowe.")
+        print("\nGotowe, bez błędów.")
 
 
 if __name__ == "__main__":
