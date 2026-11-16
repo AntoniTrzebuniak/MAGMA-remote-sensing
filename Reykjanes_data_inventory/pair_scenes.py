@@ -5,7 +5,7 @@ import pandas as pd
 
 from common import OUT, save
 
-COLS = ["sensor", "levels", "pass_id", "product_id", "datetime_utc", "roi_cover_pass", "cloud", "sun_elevation"]
+COLS = ["sensor", "day_night", "levels", "pass_id", "product_id", "datetime_utc", "roi_cover_pass", "cloud", "sun_elevation"]
 
 
 def load(name):
@@ -20,9 +20,12 @@ def load(name):
         d["roi_cover_pass"] = d.get("roi_cover", 1.0)
     if "sun_elevation" not in d:
         d["sun_elevation"] = np.nan
+    if "day_night" not in d:
+        d["day_night"] = "day"
     sc = d["scene_cloud"].where(d["scene_cloud"] >= 0) / 100
     d["cloud"] = d["roi_cloud"].fillna(sc) if "roi_cloud" in d else sc
     d["cloud"] = d.groupby("pass_id")["cloud"].transform("mean")
+    d.loc[d.day_night == "night", "cloud"] = np.nan
     d["levels"] = d.groupby("pass_id")["level"].transform(lambda s: "+".join(sorted(set(s.astype(str)))))
     d = d.sort_values("roi_cover_pass", ascending=False).drop_duplicates("pass_id")
     return d.sort_values("datetime_utc")
@@ -60,16 +63,18 @@ def main():
     dn = match(night, day, "day", 48)
     save(dn, "pairs_landsat_daynight.csv")
 
-    allp = pd.concat([hsi, day.assign(sensor=day.sensor + " dzień"), night.assign(sensor=night.sensor + " noc")],
+    pl = {"day": "dzień", "night": "noc"}
+    allp = pd.concat([hsi.assign(sensor=hsi.sensor + " " + hsi.day_night.map(pl)), day.assign(sensor=day.sensor + " dzień"), night.assign(sensor=night.sensor + " noc")],
                      ignore_index=True)
     out = [f"# Dostępność danych, ROI Reykjanes",
            f"Filtry: pokrycie ROI >= {a.min_cover}, chmury <= {a.max_cloud} (nocne bez filtra chmur)", "",
            "## Przeloty na rok", "```", pd.crosstab(allp.sensor, allp.datetime_utc.dt.year).to_string(), "```", "",
            "## Sceny hiperspektralne vs najbliższy Landsat"]
-    for s, g in pairs.groupby("sensor"):
-        adt = g.day_dt_h.abs()
-        out.append(f"- {s}: {len(g)} scen | Landsat dzień <= 6 h: {(adt <= 6).sum()}, <= 24 h: {(adt <= 24).sum()}, "
-                   f"<= 72 h: {(adt <= 72).sum()} | noc w ±7 dni: {(g.n_night_pm168h > 0).sum()}")
+    for (s, kind), g in pairs.groupby(["sensor", "day_night"]):
+        adt = g[f"{kind}_dt_h"].abs()
+        extra = f" | noc w ±7 dni: {(g.n_night_pm168h > 0).sum()}" if kind == "day" else ""
+        out.append(f"- {s} {pl[kind]}: {len(g)} scen | Landsat {pl[kind]} <= 6 h: {(adt <= 6).sum()}, "
+                   f"<= 24 h: {(adt <= 24).sum()}, <= 72 h: {(adt <= 72).sum()}{extra}")
     out += ["", "## Landsat noc",
             f"- przelotów: {len(dn)}, słońce < 0°: {(dn.sun_elevation < 0).sum()}, "
             f"z czystą sceną dzienną w ±48 h: {(dn.n_day_pm48h > 0).sum()}",

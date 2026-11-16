@@ -1,6 +1,5 @@
 import argparse
-import base64
-import os
+
 import pandas as pd
 from pystac import ItemCollection
 from pystac_client import Client
@@ -12,20 +11,17 @@ STAC = "https://geoservice.dlr.de/eoc/ogc/stac/v1/"
 PREFIXES = ("eo:", "view:", "sat:", "enmap:")
 
 
-def auth_headers():
-    up = os.environ.get("GDAL_HTTP_USERPWD")
-    return {"Authorization": "Basic " + base64.b64encode(up.encode()).decode()} if up else None
-
-
 def to_rows(items, level):
     rows = []
     for it in items:
         p = it.properties
         extra = {k: v for k, v in p.items() if k.startswith(PREFIXES) and not isinstance(v, (list, dict))}
+        sun = p.get("view:sun_elevation")
+        night = str(p.get("sat:orbit_state", "")).lower() == "ascending" or (sun is not None and sun < 0)
         rows.append({
             "sensor": "EnMAP", "level": level, "product_id": it.id,
             "datetime_utc": it.datetime or p.get("start_datetime"),
-            "day_night": "day", "sun_elevation": p.get("view:sun_elevation"),
+            "day_night": "night" if night else "day", "sun_elevation": sun,
             "scene_cloud": p.get("eo:cloud_cover"), **extra,
         })
     return rows
@@ -38,7 +34,7 @@ def main():
     ap.add_argument("--levels", default="L1C,L2A")
     a = ap.parse_args()
 
-    cat = Client.open(STAC, headers=auth_headers())
+    cat = Client.open(STAC)
     OUT.mkdir(exist_ok=True)
     rows, geoms = [], []
     for lvl in a.levels.split(","):
@@ -47,18 +43,19 @@ def main():
             items = list(cat.search(collections=[coll], bbox=ROI.bounds,
                                     datetime=f"{a.start}/{a.end}", limit=100).items())
         except Exception as e:
-            print(f"{coll}: brak: {e}")
+            print(f"{coll}: błąd wyszukiwania: {e}")
             continue
-        print(f"{coll}: {len(items)} itemow")
+        print(f"{coll}: {len(items)} produktów")
         if not items:
-            print("  katalog:", [c.id for c in cat.get_collections() if "ENMAP" in c.id.upper()])
+            print("  kolekcje EnMAP w katalogu:", [c.id for c in cat.get_collections() if "ENMAP" in c.id.upper()])
             continue
         ItemCollection(items).save_object(str(OUT / f"enmap_{lvl}_items.geojson"))
         rows += to_rows(items, lvl)
         geoms += [shape(it.geometry) for it in items]
     if not rows:
-        print("No data")
+        print("Brak wyników. Sprawdź nazwy kolekcji w katalogu STAC i dane logowania.")
         return
+
     df = pd.DataFrame(rows)
     dt = pd.to_datetime(df["datetime_utc"], utc=True)
     take = df["product_id"].str.extract(r"(DT\d+)")[0]
@@ -67,7 +64,7 @@ def main():
     save(df, "enmap.csv")
 
     p = df.drop_duplicates("pass_id")
-    print("\nROI >= 50% na rok:")
+    print("\nPrzeloty EnMAP nad ROI (pokrycie ROI >= 50%) na rok:")
     print(p[p.roi_cover_pass >= 0.5].groupby(pd.to_datetime(p.datetime_utc, utc=True).dt.year).size().to_string())
 
 

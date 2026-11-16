@@ -1,107 +1,71 @@
 import argparse
-import json
-import os
-from concurrent.futures import ThreadPoolExecutor
-import numpy as np
+
 import pandas as pd
-import planetary_computer
-import rasterio
+from pystac import ItemCollection
 from pystac_client import Client
-from rasterio.features import geometry_mask
-from rasterio.warp import transform_geom
-from rasterio.windows import Window, from_bounds
-from shapely.geometry import mapping, shape
+from shapely.geometry import shape
 
-from common import OUT, ROI, save
+from common import OUT, ROI, add_pass_cover, save
 
-PC = "https://planetarycomputer.microsoft.com/api/stac/v1"
+STAC = "https://geoservice.dlr.de/eoc/ogc/stac/v1/"
+PREFIXES = ("eo:", "view:", "sat:", "enmap:")
 
 
-def read_roi(href):
-    with rasterio.open(href) as src:
-        g = transform_geom("EPSG:4326", src.crs, mapping(ROI))
-        win = from_bounds(*shape(g).bounds, transform=src.transform).round_offsets().round_lengths()
-        win = win.intersection(Window(0, 0, src.width, src.height))
-        a = src.read(1, window=win)
-        inside = geometry_mask([g], a.shape, src.window_transform(win), invert=True)
-        return a[inside]
-
-
-def landsat_qa(href):
-    v = read_roi(planetary_computer.sign(href))
-    ok = (v & 1) == 0
-    if not ok.any():
-        return np.nan, np.nan, 0.0
-    v = v[ok]
-    return ((v & 0b11110) > 0).mean(), ((v & 0b100000) > 0).mean(), ok.mean()
-
-
-def enmap_qa(href):
-    v = read_roi(href)
-    ok = (v == 0) | (v == 1)
-    if not ok.any():
-        return np.nan, np.nan, 0.0
-    return (v[ok] == 1).mean(), np.nan, ok.mean()
-
-
-def run(fn, jobs, workers):
-    def safe(href):
-        try:
-            return fn(href)
-        except Exception as e:
-            print("  !", href.split("?")[0].rsplit("/", 1)[-1], e)
-            return np.nan, np.nan, np.nan
-    with ThreadPoolExecutor(workers) as ex:
-        return list(ex.map(safe, [h for _, h in jobs]))
-
-
-def scene_key(pid):
-    return "_".join(pid.split("_")[k] for k in (0, 2, 3))
-
-
-def landsat(a):
-    df = pd.read_csv(OUT / "landsat.csv")
-    day = df[(df.day_night == "day") & (df.scene_cloud <= a.max_scene_cloud) & (df.roi_cover > 0)]
-    t0, t1 = df.datetime_utc.min()[:10], df.datetime_utc.max()[:10]
-    items = Client.open(PC).search(collections=["landsat-c2-l2"], bbox=ROI.bounds,
-                                   datetime=f"{t0}/{t1}", limit=500).items()
-    qa = {scene_key(it.id): it.assets["qa_pixel"].href for it in items}
-    jobs = [(i, qa[scene_key(p)]) for i, p in day.product_id.items() if scene_key(p) in qa]
-    print(f"Landsat: {len(jobs)}/{len(day)} dziennych scen L2 na PC")
-    for (i, _), r in zip(jobs, run(landsat_qa, jobs, a.workers)):
-        df.loc[i, ["roi_cloud", "roi_snow", "roi_valid"]] = r
-    save(df, "landsat.csv")
-
-
-def enmap(a):
-    if not os.environ.get("GDAL_HTTP_USERPWD"):
-        print("enmap brak hasla ")
-        return
-    df = pd.read_csv(OUT / "enmap.csv")
-    feats = json.loads((OUT / "enmap_L2A_items.geojson").read_text())["features"]
-    hrefs = {}
-    for f in feats:
-        for k, asset in f["assets"].items():
-            s = (k + asset["href"]).upper()
-            if "QUALITY_CLOUD" in s and "SHADOW" not in s:
-                hrefs[f["id"]] = asset["href"]
-    jobs = [(i, hrefs[p]) for i, p in df.product_id.items() if p in hrefs and df.loc[i, "roi_cover"] > 0]
-    print(f"EnMAP: {len(jobs)} kafli L2A z maską chmur nad ROI")
-    for (i, _), r in zip(jobs, run(enmap_qa, jobs, a.workers)):
-        df.loc[i, ["roi_cloud", "roi_snow", "roi_valid"]] = r
-    save(df, "enmap.csv")
+def to_rows(items, level):
+    rows = []
+    for it in items:
+        p = it.properties
+        extra = {k: v for k, v in p.items() if k.startswith(PREFIXES) and not isinstance(v, (list, dict))}
+        sun = p.get("view:sun_elevation")
+        night = str(p.get("sat:orbit_state", "")).lower() == "ascending" or (sun is not None and sun < 0)
+        rows.append({
+            "sensor": "EnMAP", "level": level, "product_id": it.id,
+            "datetime_utc": it.datetime or p.get("start_datetime"),
+            "day_night": "night" if night else "day", "sun_elevation": sun,
+            "scene_cloud": p.get("eo:cloud_cover"), **extra,
+        })
+    return rows
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--what", nargs="+", default=["landsat", "enmap"])
-    ap.add_argument("--max-scene-cloud", type=float, default=90)
-    ap.add_argument("--workers", type=int, default=8)
+    ap.add_argument("--start", default="2022-04-01")
+    ap.add_argument("--end", default="2026-12-31")
+    ap.add_argument("--levels", default="L1C,L2A")
     a = ap.parse_args()
-    if "landsat" in a.what:
-        landsat(a)
-    if "enmap" in a.what:
-        enmap(a)
+
+    cat = Client.open(STAC)
+    OUT.mkdir(exist_ok=True)
+    rows, geoms = [], []
+    for lvl in a.levels.split(","):
+        coll = f"ENMAP_HSI_{lvl}"
+        try:
+            items = list(cat.search(collections=[coll], bbox=ROI.bounds,
+                                    datetime=f"{a.start}/{a.end}", limit=100).items())
+        except Exception as e:
+            print(f"{coll}: błąd wyszukiwania: {e}")
+            continue
+        print(f"{coll}: {len(items)} produktów")
+        if not items:
+            print("  kolekcje EnMAP w katalogu:", [c.id for c in cat.get_collections() if "ENMAP" in c.id.upper()])
+            continue
+        ItemCollection(items).save_object(str(OUT / f"enmap_{lvl}_items.geojson"))
+        rows += to_rows(items, lvl)
+        geoms += [shape(it.geometry) for it in items]
+    if not rows:
+        print("Brak wyników. Sprawdź nazwy kolekcji w katalogu STAC i dane logowania.")
+        return
+
+    df = pd.DataFrame(rows)
+    dt = pd.to_datetime(df["datetime_utc"], utc=True)
+    take = df["product_id"].str.extract(r"(DT\d+)")[0]
+    df["pass_id"] = "EnMAP_" + take.fillna(dt.dt.floor("10min").dt.strftime("%Y%m%dT%H%M"))
+    df = add_pass_cover(df, geoms).sort_values("datetime_utc")
+    save(df, "enmap.csv")
+
+    p = df.drop_duplicates("pass_id")
+    print("\nPrzeloty EnMAP nad ROI (pokrycie ROI >= 50%) na rok:")
+    print(p[p.roi_cover_pass >= 0.5].groupby(pd.to_datetime(p.datetime_utc, utc=True).dt.year).size().to_string())
 
 
 if __name__ == "__main__":
