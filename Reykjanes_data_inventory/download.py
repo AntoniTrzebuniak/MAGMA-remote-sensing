@@ -290,7 +290,7 @@ def main():
     root.mkdir(exist_ok=True)
     if failed:
         pd.DataFrame(failed).drop(columns="Index").to_csv(log, index=False)
-        print(f"\n{len(failed)} plików nie pobrano -> {log}. Uruchom ponownie to samo polecenie.")
+        print(f"\n{len(failed)} nie pobrano. {log}")
     else:
         log.unlink(missing_ok=True)
         print("\nGotowe, bez błędów.")
