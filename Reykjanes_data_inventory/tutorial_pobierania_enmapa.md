@@ -9,8 +9,8 @@ Na dysku nic nie zostaje. Lista plików jest w `manifest/download_manifest.csv` 
 | Kto | Co | Produkty |
 |---|---|---|
 | Jakub | P1 (dzień i noc) | 111 |
-| Osoba A | P2 + P3, sceny **dzienne** | 110 |
-| Osoba B | P2 + P3, sceny **nocne** | 92 |
+| Osoba A | P2
+| Osoba B | P3 
 
 `--owner jakub` w poleceniach to tylko etykieta w manifeście, nie konto. Wpisujecie ją wszyscy.
 
