@@ -207,32 +207,37 @@ def run_usgs(rows, root, workers, keep_local, batch):
     if rows.empty:
         return []
     if not (os.environ.get("USGS_USERNAME") and os.environ.get("USGS_TOKEN")):
-        print(f"\nLandsat noc: brak USGS_USERNAME / USGS_TOKEN, pomijam {len(rows)} plików")
+        print(f"\nLandsat przez USGS: brak USGS_USERNAME / USGS_TOKEN, pomijam {len(rows)} plików")
         return []
+    from common import ROI
     from m2m import M2M
-    api, failed = M2M(), []
-    pids = list(dict.fromkeys(rows.product_id))
-    print(f"\nLandsat noc przez USGS M2M: {len(rows)} plików, {len(pids)} scen, paczki po {batch}")
+    api, failed = M2M(bbox=ROI.bounds), []
+    rows = rows.assign(scene=rows.dst.map(lambda d: Path(d).parent.name), name=rows.dst.map(lambda d: Path(d).name))
+    scenes = list(dict.fromkeys(rows.scene))
+    print(f"\nLandsat przez USGS M2M: {len(rows)} plików, {len(scenes)} scen, paczki po {batch}")
     try:
-        for i in range(0, len(pids), batch):
-            part = rows[rows.product_id.isin(pids[i:i + batch])].copy()
-            part["name"] = part.dst.map(lambda d: Path(d).name)
-            try:
-                urls = api.urls(pids[i:i + batch], set(part.name))
-            except Exception as e:
-                print(f"  ! paczka {i + 1}–{min(i + batch, len(pids))}: {str(e)[:200]} — loguję ponownie, pomijam paczkę")
+        for i in range(0, len(scenes), batch):
+            chunk = scenes[i:i + batch]
+            part = rows[rows.scene.isin(chunk)].copy()
+            urls = {}
+            for dataset, ids in (("landsat_ot_c2_l2", [s for s in chunk if "_L2SP_" in s]),
+                                 ("landsat_ot_c2_l1", [s for s in chunk if "_L2SP_" not in s])):
+                if not ids:
+                    continue
                 try:
-                    api.login()
-                except Exception:
-                    pass
-                urls = {}
+                    urls.update(api.urls(ids, set(part[part.scene.isin(ids)].name), dataset))
+                except Exception as e:
+                    print(f"  ! paczka {i + 1}–{i + len(chunk)} ({dataset}): {str(e)[:200]} — loguję ponownie, pomijam")
+                    try:
+                        api.login()
+                    except Exception:
+                        pass
             part["href"] = part.name.map(urls)
-            missing = part[part.href.isna()]
-            for r in missing.itertuples():
+            for r in part[part.href.isna()].itertuples():
                 print(f"  ! {r.name}: USGS nie zwrócił linku")
                 failed.append({**r._asdict(), "error": "brak linku z M2M"})
-            failed += run(part[part.href.notna()].drop(columns="name"), root, workers,
-                          f"Landsat noc, sceny {i + 1}–{min(i + batch, len(pids))}", keep_local)
+            failed += run(part[part.href.notna()].drop(columns=["name", "scene"]), root, workers,
+                          f"Landsat USGS, sceny {i + 1}–{i + len(chunk)}", keep_local)
     finally:
         api.logout()
     return failed
@@ -250,6 +255,7 @@ def main():
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--keep-local", action="store_true")
     ap.add_argument("--landsat-source", choices=["usgs", "aws"], default="usgs")
+    ap.add_argument("--landsat-day-source", choices=["usgs", "pc"], default="usgs")
     ap.add_argument("--batch", type=int, default=20)
     a = ap.parse_args()
 
@@ -280,7 +286,8 @@ def main():
     print(f"{a.owner} {a.priority}: {len(m)} plików, {done.sum()} już jest ({where}), {(~done).sum()} do pobrania")
     m, is_en = m[~done], is_en[~done]
 
-    via_usgs = m.href.str.startswith("s3://") & (a.landsat_source == "usgs")
+    via_usgs = ((m.href.str.startswith("s3://") & (a.landsat_source == "usgs"))
+                | (m.href.str.contains("blob.core.windows.net") & (a.landsat_day_source == "usgs")))
     failed = run(m[~is_en & ~via_usgs], root, a.workers, "Landsat", a.keep_local)
     failed += run_usgs(m[via_usgs], root, a.workers, a.keep_local, a.batch)
     failed += run(m[is_en], root, a.enmap_workers, "EnMAP", a.keep_local)
@@ -290,7 +297,7 @@ def main():
     root.mkdir(exist_ok=True)
     if failed:
         pd.DataFrame(failed).drop(columns="Index").to_csv(log, index=False)
-        print(f"\n{len(failed)} nie pobrano. {log}")
+        print(f"\n{len(failed)} plików nie pobrano -> {log}. Uruchom ponownie to samo polecenie.")
     else:
         log.unlink(missing_ok=True)
         print("\nGotowe, bez błędów.")
