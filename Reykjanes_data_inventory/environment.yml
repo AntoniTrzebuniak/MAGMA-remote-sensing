@@ -1,11 +1,17 @@
 name: reykjanes
 channels:
   - conda-forge
+  - nodefaults
 dependencies:
-  - python=3.12
+  - python=3.12.14
   - pystac-client
   - shapely
   - pyproj
   - pandas
   - rasterio
   - planetary-computer
+  - google-cloud-storage
+  - gcsfs
+  - fsspec
+  - xarray
+  - google-auth
