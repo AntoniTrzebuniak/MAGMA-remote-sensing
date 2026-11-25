@@ -23,14 +23,20 @@ def load(name):
     return d
 
 
+def utc(ev, col, fallback):
+    if col not in ev:
+        return fallback
+    return pd.to_datetime(ev[col], utc=True, errors="coerce").dt.tz_localize(None).fillna(fallback)
+
+
 def add_phase(d, ev, cooling_days):
     d["phase"], d["event"] = "background", ""
-    day = pd.Timedelta(days=1)
+    ev = ev.assign(t0=utc(ev, "start_utc", ev.start), t1=utc(ev, "end_utc", ev.end + pd.Timedelta(days=1)))
     for e in ev.itertuples():
-        m = (d.t >= e.end + day) & (d.t < e.end + day + pd.Timedelta(days=cooling_days))
+        m = (d.t >= e.t1) & (d.t < e.t1 + pd.Timedelta(days=cooling_days))
         d.loc[m, ["phase", "event"]] = ["cooling", e.name]
     for e in ev.itertuples():
-        m = (d.t >= e.start) & (d.t < e.end + day)
+        m = (d.t >= e.t0) & (d.t < e.t1)
         d.loc[m, ["phase", "event"]] = ["eruption", e.name]
     d["priority"] = d.phase.map(PRIO)
     return d

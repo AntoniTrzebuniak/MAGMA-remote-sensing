@@ -19,3 +19,5 @@ dependencies:
   - scikit-image
   - geopandas
   - pillow
+  - requests
+  - matplotlib
