@@ -15,5 +15,9 @@ dependencies:
   - fsspec
   - xarray
   - google-auth
+  - scipy
+  - scikit-image
+  - geopandas
+  - pillow
   - requests
   - matplotlib
