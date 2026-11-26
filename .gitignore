@@ -223,3 +223,10 @@ __marimo__/
 
 # vscode
 .vscode/*
+
+#Reykjanes: local files
+Reykjanes_data_inventory/data/
+*.gpkg-shm
+*.gpkg-wal
+
+**/.vscode/
